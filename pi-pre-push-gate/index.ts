@@ -601,6 +601,12 @@ export default function (pi: ExtensionAPI) {
                 securityAudit: "deepseek/deepseek-reasoner",
                 testGate: "deepseek/deepseek-chat",
               },
+              pinkgreen: {
+                selfReview: "ministral-8b-latest",
+                structuredReview: "mistral-medium-latest",
+                securityAudit: "mistral-medium-latest",
+                testGate: "ministral-3b-latest",
+              },
             };
 
             const LAYER_KEYS: Record<string, string> = {
