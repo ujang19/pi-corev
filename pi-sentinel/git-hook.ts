@@ -9,7 +9,7 @@ const HOOK_PATH = path.join(".git", "hooks", "pre-push");
 
 const HOOK_TEMPLATE = `#!/bin/sh
 # ═══════════════════════════════════════════════════════════════
-# pi-pre-push-gate — Auto-generated pre-push hook
+# pi-sentinel — Auto-generated pre-push hook
 # Blocks 'git push' until /gate review pipeline passes.
 # Installed by: /gate hook install
 # ═══════════════════════════════════════════════════════════════
@@ -18,7 +18,7 @@ MARKER=".git/GATE_MARKER"
 HOOK_MODE="{hookMode}"
 
 echo ""
-echo "🛡  Pre-Push Gate — pi-pre-push-gate"
+echo "🛡  Pre-Push Gate — pi-sentinel"
 echo "─────────────────────────────────────"
 
 if [ ! -f "$MARKER" ]; then

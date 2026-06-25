@@ -1,4 +1,4 @@
-# pi-pre-push-gate
+# pi-sentinel
 
 **5-Layer Pre-Push Review Pipeline for Pi Coding Agent**
 
@@ -19,7 +19,7 @@ This extension automates the entire review pipeline so you don't have to remembe
 ```bash
 pi install git:github.com/ujang/pirevuew
 # or locally:
-pi install ./pi-pre-push-gate
+pi install ./pi-sentinel
 ```
 
 Optional integrations (auto-detected):
@@ -74,7 +74,8 @@ Gate always uses **different models** than your session — no bias.
 **Switch models instantly:**
 
 ```bash
-/gate model show                  # See current config
+/gate-model                       # Interactive TUI (layer → preset)
+/gate model                       # Same as /gate-model
 /gate model presets               # List all presets
 /gate model anthropic             # Switch to Anthropic lineup
 /gate model google                # Switch to Google lineup
@@ -112,7 +113,8 @@ Or set manually in `~/.pi/agent/settings.json`:
 | `/gate hook install` | Install pre-push git hook |
 | `/gate hook uninstall` | Remove hook |
 | `/gate hook status` | Check hook status |
-| `/gate model` | Show current model config |
+| `/gate-model` | Interactive model picker (TUI) |
+| `/gate model` | Same picker, or CLI presets |
 | `/gate model <preset>` | Switch to preset (mistral/anthropic/google/openai/deepseek) |
 | `/gate model <l1\|l2\|l3\|l4> <id>` | Change single layer model |
 | `/gate config` | Show full configuration |

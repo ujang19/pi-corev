@@ -43,10 +43,6 @@ export function injectSelfReviewPrompt(
     role: "user",
     content: [{ type: "text", text: prompt }],
   });
-
-  // Note: model switching per layer would be handled via
-  // pi.setModel?.(resolveModel(gate.config, GateLayer.SELF_REVIEW))
-  // if Pi exposes that API on the extension context.
 }
 
 export function analyzeSelfReviewResponse(response: string): {

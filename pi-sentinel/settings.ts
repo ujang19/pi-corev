@@ -15,15 +15,11 @@ export const DEFAULT_CONFIG: GateConfig = {
   },
 
   models: {
-    // All explicit — never inherit from session model
-    // Rate-limit aware Mistral lineup:
-    // - Ministral 8B: 1M tok/min, 12.5 RPS → ideal for 5-iteration self-review
-    // - Medium 3.1:  1M tok/min,  4.2 RPS → best quality structured/security
-    // - Ministral 3B: 2M tok/min, 50   RPS → ultra-fast test generation
-    selfReview: "mistral/ministral-8b-2512",
-    structuredReview: "mistral/mistral-medium-2508",
-    securityAudit: "mistral/mistral-medium-2508",
-    testGate: "mistral/ministral-3b-2512",
+    // Explicit per layer — resolved via ModelRegistry (models.json). Use /gate model router for cf/*.
+    selfReview: "cf/ministral-8b-latest",
+    structuredReview: "cf/mistral-medium-latest",
+    securityAudit: "cf/mistral-medium-latest",
+    testGate: "cf/ministral-3b-latest",
   },
 
   maxIterations: 5,

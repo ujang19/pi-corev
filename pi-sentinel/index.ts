@@ -1,14 +1,14 @@
 /**
- * pi-pre-push-gate — 5-Layer Pre-Push Review Pipeline
+ * pi-sentinel — 5-Layer Pre-Push Review Pipeline
  *
  * A cross-model quality gate that runs before git push.
  * Layers: Compaction → Self-Review → Structured → Security → Test → Human
  *
  * Command: /gate
- * Install: pi install npm:pi-pre-push-gate
+ * Install: pi install npm:pi-sentinel
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { Type } from "@sinclair/typebox";
 
 import {
   GateLayer,
@@ -71,6 +71,18 @@ import {
   isHookInstalled,
 } from "./git-hook";
 import { checkQualityMetrics } from "./quality-metrics";
+import {
+  GATE_MODEL_PRESETS,
+  getGateModelPresets,
+  runInteractiveModelPicker,
+  type GateModelKey,
+} from "./model-picker";
+import {
+  rememberImplementModel,
+  restoreImplementModel,
+  switchGateModelForLayer,
+} from "./gate-layer-model";
+import { formatModelRef } from "./model-registry";
 
 // ── Extension entry ────────────────────────────────────────────────
 
@@ -84,9 +96,14 @@ export default function (pi: ExtensionAPI) {
 
   // ── Helpers ──────────────────────────────────────────────────────
 
-  function getConfig(): GateConfig {
+  async function getConfig(): Promise<GateConfig> {
     try {
-      const userConfig = pi.getSetting?.("prePushGate") ?? {};
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      const os = await import("node:os");
+      const settingsPath = path.join(os.homedir(), ".pi", "agent", "settings.json");
+      const raw = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+      const userConfig = raw.prePushGate ?? {};
       return { ...DEFAULT_CONFIG, ...userConfig, layers: { ...DEFAULT_CONFIG.layers, ...(userConfig.layers ?? {}) }, models: { ...DEFAULT_CONFIG.models, ...(userConfig.models ?? {}) }, qualityMetrics: { ...DEFAULT_CONFIG.qualityMetrics, ...(userConfig.qualityMetrics ?? {}) } };
     } catch {
       return DEFAULT_CONFIG;
@@ -100,14 +117,27 @@ export default function (pi: ExtensionAPI) {
     updateFooter(pi, null);
   }
 
-  async function advanceToLayer(layer: GateLayer) {
+  async function advanceToLayer(layer: GateLayer, ctx?: ExtensionContext) {
     if (!gate) return;
     gate.phase = layer;
     pendingLayerAdvance = null;
-    await handleLayerEntry(layer);
+    await handleLayerEntry(layer, ctx);
   }
 
-  async function handleLayerEntry(layer: GateLayer) {
+  async function queueLayerPrompt(
+    layer: GateLayer,
+    ctx: ExtensionContext | undefined,
+    inject: () => void,
+  ) {
+    if (!gate) return;
+    if (ctx) {
+      await switchGateModelForLayer(pi, ctx, gate, layer);
+    }
+    promptInjectedThisTurn = true;
+    inject();
+  }
+
+  async function handleLayerEntry(layer: GateLayer, ctx?: ExtensionContext) {
     if (!gate) return;
     const config = gate.config;
 
@@ -117,16 +147,14 @@ export default function (pi: ExtensionAPI) {
         const result = generateCompactionLayerResult(compacted);
         gate.layers.push(result);
         updateFooter(pi, gate);
-        await advanceToLayer(GateLayer.SELF_REVIEW);
+        await advanceToLayer(GateLayer.SELF_REVIEW, ctx);
         break;
       }
 
       case GateLayer.SELF_REVIEW: {
         gate.currentIteration = 0;
         updateFooter(pi, gate);
-        // Queue first self-review prompt for next agent turn
-        promptInjectedThisTurn = true;
-        injectSelfReviewPrompt(pi, gate);
+        await queueLayerPrompt(layer, ctx, () => injectSelfReviewPrompt(pi, gate));
         break;
       }
 
@@ -136,8 +164,9 @@ export default function (pi: ExtensionAPI) {
         if (qualityIssues.length > 0) {
           gate.findings.push(...qualityIssues);
         }
-        promptInjectedThisTurn = true;
-        injectStructuredReviewPrompt(pi, gate);
+        await queueLayerPrompt(layer, ctx, () =>
+          injectStructuredReviewPrompt(pi, gate),
+        );
         break;
       }
 
@@ -154,19 +183,19 @@ export default function (pi: ExtensionAPI) {
           };
           gate.layers.push(result);
           updateFooter(pi, gate);
-          await advanceToLayer(GateLayer.TEST);
+          await advanceToLayer(GateLayer.TEST, ctx);
           return;
         }
         updateFooter(pi, gate);
-        promptInjectedThisTurn = true;
-        injectSecurityAuditPrompt(pi, gate);
+        await queueLayerPrompt(layer, ctx, () =>
+          injectSecurityAuditPrompt(pi, gate),
+        );
         break;
       }
 
       case GateLayer.TEST: {
         updateFooter(pi, gate);
-        promptInjectedThisTurn = true;
-        injectTestGatePrompt(pi, gate);
+        await queueLayerPrompt(layer, ctx, () => injectTestGatePrompt(pi, gate));
         break;
       }
 
@@ -178,7 +207,7 @@ export default function (pi: ExtensionAPI) {
 
       case GateLayer.PASSED:
       case GateLayer.BLOCKED:
-        await finalizeGate();
+        await finalizeGate(ctx);
         break;
 
       default:
@@ -186,7 +215,7 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  async function finalizeGate() {
+  async function finalizeGate(ctx?: ExtensionContext) {
     if (!gate) return;
 
     const verdict = computeVerdict(gate.layers, gate.config);
@@ -221,6 +250,10 @@ export default function (pi: ExtensionAPI) {
     }
 
     updateFooter(pi, gate);
+
+    if (ctx) {
+      await restoreImplementModel(pi, ctx, gate);
+    }
   }
 
   // ── Events ───────────────────────────────────────────────────────
@@ -243,14 +276,14 @@ export default function (pi: ExtensionAPI) {
     }
 
     // Auto-trigger: detect plan completion
-    if (!gate && getConfig().autoTrigger) {
+    if (!gate && (await getConfig()).autoTrigger) {
       if (detectTrigger(responseText)) {
         await startGate(ctx);
       }
     }
   });
 
-  async function processLayerResponse(responseText: string, _ctx: ExtensionContext) {
+  async function processLayerResponse(responseText: string, ctx: ExtensionContext) {
     if (!gate) return;
 
     const config = gate.config;
@@ -264,7 +297,7 @@ export default function (pi: ExtensionAPI) {
           const result = generateSelfReviewLayerResult(gate);
           gate.layers.push(result);
           gate.currentIteration = 0;
-          await advanceToLayer(GateLayer.STRUCTURED);
+          await advanceToLayer(GateLayer.STRUCTURED, ctx);
         } else if (issuesFixed) {
           // Issues fixed — loop again
           gate.currentIteration++;
@@ -272,11 +305,12 @@ export default function (pi: ExtensionAPI) {
             const result = generateSelfReviewLayerResult(gate);
             gate.layers.push(result);
             gate.currentIteration = 0;
-            await advanceToLayer(GateLayer.STRUCTURED);
+            await advanceToLayer(GateLayer.STRUCTURED, ctx);
           } else {
             updateFooter(pi, gate);
-            promptInjectedThisTurn = true;
-            injectSelfReviewPrompt(pi, gate);
+            await queueLayerPrompt(gate.phase, ctx, () =>
+              injectSelfReviewPrompt(pi, gate),
+            );
           }
         } else {
           // Unclear — advance
@@ -285,11 +319,12 @@ export default function (pi: ExtensionAPI) {
             const result = generateSelfReviewLayerResult(gate);
             gate.layers.push(result);
             gate.currentIteration = 0;
-            await advanceToLayer(GateLayer.STRUCTURED);
+            await advanceToLayer(GateLayer.STRUCTURED, ctx);
           } else {
             updateFooter(pi, gate);
-            promptInjectedThisTurn = true;
-            injectSelfReviewPrompt(pi, gate);
+            await queueLayerPrompt(gate.phase, ctx, () =>
+              injectSelfReviewPrompt(pi, gate),
+            );
           }
         }
         break;
@@ -308,11 +343,11 @@ export default function (pi: ExtensionAPI) {
         gate.layers.push(result);
 
         if (!passed) {
-          await finalizeGate();
+          await finalizeGate(ctx);
         } else {
           const next = nextLayer(GateLayer.STRUCTURED, config);
-          if (next) await advanceToLayer(next);
-          else await finalizeGate();
+          if (next) await advanceToLayer(next, ctx);
+          else await finalizeGate(ctx);
         }
         break;
       }
@@ -322,11 +357,11 @@ export default function (pi: ExtensionAPI) {
         gate.layers.push(result);
 
         if (!result.passed) {
-          await finalizeGate();
+          await finalizeGate(ctx);
         } else {
           const next = nextLayer(GateLayer.SECURITY, config);
-          if (next) await advanceToLayer(next);
-          else await finalizeGate();
+          if (next) await advanceToLayer(next, ctx);
+          else await finalizeGate(ctx);
         }
         break;
       }
@@ -343,11 +378,11 @@ export default function (pi: ExtensionAPI) {
         gate.layers.push(result);
 
         if (!passed) {
-          await finalizeGate();
+          await finalizeGate(ctx);
         } else {
           const next = nextLayer(GateLayer.TEST, config);
-          if (next) await advanceToLayer(next);
-          else await finalizeGate();
+          if (next) await advanceToLayer(next, ctx);
+          else await finalizeGate(ctx);
         }
         break;
       }
@@ -405,16 +440,122 @@ export default function (pi: ExtensionAPI) {
     await updateGateModels(ctx, { [key]: modelId });
   }
 
+  const LAYER_KEYS: Record<string, GateModelKey> = {
+    l1: "selfReview",
+    "self-review": "selfReview",
+    l2: "structuredReview",
+    structured: "structuredReview",
+    l3: "securityAudit",
+    security: "securityAudit",
+    l4: "testGate",
+    test: "testGate",
+    tests: "testGate",
+  };
+
+  async function openModelPicker(ctx: ExtensionContext) {
+    const cfg = await getConfig();
+    await runInteractiveModelPicker(ctx, cfg.models, {
+      applyPresetAll: async (preset, models) => {
+        await updateGateModels(ctx, models);
+        ctx.ui.notify(`✅ All layers → ${preset} preset`, "success");
+      },
+      applyPresetLayer: async (layer, preset, modelId) => {
+        await updateGateModel(ctx, layer, modelId);
+        ctx.ui.notify(`✅ ${layer} → ${modelId} (${preset})`, "success");
+      },
+      applyCustomAll: async (modelId) => {
+        await updateGateModels(ctx, {
+          selfReview: modelId,
+          structuredReview: modelId,
+          securityAudit: modelId,
+          testGate: modelId,
+        });
+        ctx.ui.notify(`✅ All layers → ${modelId}`, "success");
+      },
+      applyCustomLayer: async (layer, modelId) => {
+        await updateGateModel(ctx, layer, modelId);
+        ctx.ui.notify(`✅ ${layer} → ${modelId}`, "success");
+      },
+    }, ctx.modelRegistry);
+  }
+
+  async function handleGateModelCli(
+    ctx: ExtensionContext,
+    modelSub: string,
+    modelVal: string,
+  ) {
+    const PRESETS = getGateModelPresets(ctx.modelRegistry);
+
+    if (modelSub === "" || modelSub === "show" || modelSub === "pick" || modelSub === "ui") {
+      await openModelPicker(ctx);
+      return;
+    }
+
+    if (modelSub === "presets") {
+      const lines = ["📦 Available Presets:", ""];
+      for (const [name, models] of Object.entries(PRESETS)) {
+        lines.push(`  ${name}:`);
+        for (const [layer, model] of Object.entries(models)) {
+          lines.push(`    ${layer}: ${model}`);
+        }
+      }
+      lines.push("", "Usage: /gate model <preset> or /gate-model");
+      ctx.ui.notify(lines.join("\n"), "info");
+      return;
+    }
+
+    if (PRESETS[modelSub]) {
+      await updateGateModels(ctx, PRESETS[modelSub]);
+      ctx.ui.notify(`✅ Models set to "${modelSub}" preset`, "success");
+      return;
+    }
+
+    if (LAYER_KEYS[modelSub]) {
+      const key = LAYER_KEYS[modelSub];
+      const modelId = modelVal.replace(/^"|"$/g, "");
+      if (!modelId || modelId === modelSub) {
+        ctx.ui.notify(
+          `Usage: /gate model ${modelSub} <provider/model-id>`,
+          "warn",
+        );
+        return;
+      }
+      await updateGateModel(ctx, key, modelId);
+      ctx.ui.notify(`✅ ${modelSub.toUpperCase()} model → ${modelId}`, "success");
+      return;
+    }
+
+    if (modelVal.includes("/")) {
+      await updateGateModels(ctx, {
+        selfReview: modelVal,
+        structuredReview: modelVal,
+        securityAudit: modelVal,
+        testGate: modelVal,
+      });
+      ctx.ui.notify(`✅ All layers → ${modelVal}`, "success");
+      return;
+    }
+
+    ctx.ui.notify(
+      `Unknown "${modelSub}". Try /gate-model (TUI) or /gate model presets`,
+      "warn",
+    );
+  }
+
   async function startGate(ctx?: ExtensionContext) {
-    const config = getConfig();
+    const config = await getConfig();
     gate = createGateState(config);
     gate.startedAt = Date.now();
+
+    if (ctx?.model) {
+      rememberImplementModel(gate, ctx.model);
+    }
 
     ctx?.ui?.notify?.("🛡 Pre-push gate activated — 5-layer review pipeline", "info");
     updateFooter(pi, gate);
 
     // Start with Layer 0: Compaction
-    await handleLayerEntry(GateLayer.COMPACTION);
+    await handleLayerEntry(GateLayer.COMPACTION, ctx);
   }
 
   // ── Commands ─────────────────────────────────────────────────────
@@ -422,7 +563,8 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("gate", {
     description: "Start or manage the 5-layer pre-push review pipeline",
     handler: async (args, ctx) => {
-      const parts = (args ?? "").trim().split(/\s+/);
+      const trimmed = (args ?? "").trim();
+      const parts = trimmed.length ? trimmed.split(/\s+/) : [];
       const sub = parts[0]?.toLowerCase() ?? "";
 
       switch (sub) {
@@ -442,15 +584,16 @@ export default function (pi: ExtensionAPI) {
               ctx.ui.notify("Gate already running", "warn");
               return;
             }
-            const config = getConfig();
+            const config = await getConfig();
             config.layers.compaction = false;
             config.layers.security = "off";
             config.layers.humanReview = "never";
             gate = createGateState(config);
             gate.startedAt = Date.now();
+            rememberImplementModel(gate, ctx.model);
             ctx.ui.notify("🛡 Quick gate activated (skip security + human)", "info");
             updateFooter(pi, gate);
-            await handleLayerEntry(GateLayer.SELF_REVIEW);
+            await handleLayerEntry(GateLayer.SELF_REVIEW, ctx);
           }
           break;
 
@@ -501,7 +644,7 @@ export default function (pi: ExtensionAPI) {
           } else {
             gate.humanApproved = true;
             ctx.ui.notify("✅ Human review approved", "success");
-            await finalizeGate();
+            await finalizeGate(ctx);
           }
           break;
 
@@ -517,6 +660,7 @@ export default function (pi: ExtensionAPI) {
             await generateReport(gate);
             ctx.ui.notify("⛔ Human review rejected — gate BLOCKED", "error");
             updateFooter(pi, gate);
+            await restoreImplementModel(pi, ctx, gate);
           }
           break;
 
@@ -527,6 +671,7 @@ export default function (pi: ExtensionAPI) {
             clearGateMarker(gate);
             await generateReport(gate);
             ctx.ui.notify("🛑 Gate aborted", "warn");
+            await restoreImplementModel(pi, ctx, gate);
             reset();
           }
           break;
@@ -537,7 +682,7 @@ export default function (pi: ExtensionAPI) {
             switch (hookSub) {
               case "install":
                 try {
-                  installGitHook(getConfig());
+                  installGitHook(await getConfig());
                   ctx.ui.notify("✅ Pre-push hook installed → .git/hooks/pre-push", "success");
                 } catch (e: any) {
                   ctx.ui.notify(`❌ Hook install failed: ${e.message}`, "error");
@@ -565,149 +710,16 @@ export default function (pi: ExtensionAPI) {
           break;
 
         case "model":
-          {
-            const modelSub = parts[1]?.toLowerCase() ?? "";
-            const modelVal = parts.slice(2).join(" ") || parts[1] || "";
-
-            // Model presets for quick switching
-            const PRESETS: Record<string, Record<string, string>> = {
-              mistral: {
-                selfReview: "mistral/ministral-8b-2512",
-                structuredReview: "mistral/mistral-medium-2508",
-                securityAudit: "mistral/mistral-medium-2508",
-                testGate: "mistral/ministral-3b-2512",
-              },
-              anthropic: {
-                selfReview: "anthropic/claude-haiku-4-5",
-                structuredReview: "anthropic/claude-sonnet-4",
-                securityAudit: "anthropic/claude-sonnet-4",
-                testGate: "anthropic/claude-haiku-4-5",
-              },
-              google: {
-                selfReview: "google/gemini-2.5-flash",
-                structuredReview: "google/gemini-2.5-pro",
-                securityAudit: "google/gemini-2.5-pro",
-                testGate: "google/gemini-2.5-flash",
-              },
-              openai: {
-                selfReview: "openai/gpt-4o-mini",
-                structuredReview: "openai/gpt-4o",
-                securityAudit: "openai/gpt-4o",
-                testGate: "openai/gpt-4o-mini",
-              },
-              deepseek: {
-                selfReview: "deepseek/deepseek-chat",
-                structuredReview: "deepseek/deepseek-reasoner",
-                securityAudit: "deepseek/deepseek-reasoner",
-                testGate: "deepseek/deepseek-chat",
-              },
-              pinkgreen: {
-                selfReview: "ministral-8b-latest",
-                structuredReview: "mistral-medium-latest",
-                securityAudit: "mistral-medium-latest",
-                testGate: "ministral-3b-latest",
-              },
-            };
-
-            const LAYER_KEYS: Record<string, string> = {
-              l1: "selfReview",
-              "self-review": "selfReview",
-              l2: "structuredReview",
-              structured: "structuredReview",
-              l3: "securityAudit",
-              security: "securityAudit",
-              l4: "testGate",
-              test: "testGate",
-              tests: "testGate",
-            };
-
-            switch (modelSub) {
-              case "":
-              case "show": {
-                // Show current model config
-                const cfg = getConfig();
-                const lines = [
-                  "🤖 Gate Model Configuration:",
-                  "",
-                  `  L1 Self-Review:   ${cfg.models.selfReview}`,
-                  `  L2 Structured:    ${cfg.models.structuredReview}`,
-                  `  L3 Security:      ${cfg.models.securityAudit}`,
-                  `  L4 Test Gate:     ${cfg.models.testGate}`,
-                  "",
-                  "Presets: /gate model [mistral|anthropic|google|openai|deepseek]",
-                  "Per-layer: /gate model [l1|l2|l3|l4] <model-id>",
-                  "Example:   /gate model l2 anthropic/claude-opus-4",
-                ];
-                ctx.ui.notify(lines.join("\n"), "info");
-                break;
-              }
-
-              case "presets": {
-                const lines = ["📦 Available Presets:", ""];
-                for (const [name, models] of Object.entries(PRESETS)) {
-                  lines.push(`  ${name}:`);
-                  for (const [layer, model] of Object.entries(models)) {
-                    lines.push(`    ${layer}: ${model}`);
-                  }
-                }
-                lines.push("", "Usage: /gate model <preset-name>");
-                ctx.ui.notify(lines.join("\n"), "info");
-                break;
-              }
-
-              default: {
-                // Check if it's a preset name
-                if (PRESETS[modelSub]) {
-                  await updateGateModels(ctx, PRESETS[modelSub]);
-                  ctx.ui.notify(
-                    `✅ Models set to "${modelSub}" preset`,
-                    "success"
-                  );
-                }
-                // Check if it's a layer key
-                else if (LAYER_KEYS[modelSub]) {
-                  const key = LAYER_KEYS[modelSub];
-                  const modelId = modelVal.replace(/^"|"$/g, ""); // strip quotes
-                  if (!modelId || modelId === modelSub) {
-                    ctx.ui.notify(
-                      `Usage: /gate model ${modelSub} <provider/model-id>`,
-                      "warn"
-                    );
-                  } else {
-                    await updateGateModel(ctx, key, modelId);
-                    ctx.ui.notify(
-                      `✅ ${modelSub.toUpperCase()} model → ${modelId}`,
-                      "success"
-                    );
-                  }
-                }
-                // Assume it's a direct model ID for all layers
-                else if (modelVal.includes("/")) {
-                  const allModels = {
-                    selfReview: modelVal,
-                    structuredReview: modelVal,
-                    securityAudit: modelVal,
-                    testGate: modelVal,
-                  };
-                  await updateGateModels(ctx, allModels);
-                  ctx.ui.notify(
-                    `✅ All layers → ${modelVal}`,
-                    "success"
-                  );
-                } else {
-                  ctx.ui.notify(
-                    `Unknown model/preset "${modelSub}". Try /gate model presets`,
-                    "warn"
-                  );
-                }
-              }
-            }
-          }
+          await handleGateModelCli(
+            ctx,
+            parts[1]?.toLowerCase() ?? "",
+            parts.slice(2).join(" ") || "",
+          );
           break;
 
         case "config":
           {
-            const cfg = getConfig();
+            const cfg = await getConfig();
             const lines = [
               "🛡 Pre-Push Gate Config:",
               `  Layers: compaction=${cfg.layers.compaction} self-review=${cfg.layers.selfReview} structured=${cfg.layers.structured} security=${cfg.layers.security} test=${cfg.layers.testGate} human=${cfg.layers.humanReview}`,
@@ -724,10 +736,22 @@ export default function (pi: ExtensionAPI) {
 
         default:
           ctx.ui.notify(
-            "Usage: /gate [start|quick|status|report|approve|reject|abort|hook|model|config]",
+            "Usage: /gate [start|quick|status|report|approve|reject|abort|hook|model|config] · /gate-model",
             "info"
           );
       }
+    },
+  });
+
+  pi.registerCommand("gate-model", {
+    description: "Interactive TUI to configure pi-sentinel gate models",
+    handler: async (args, ctx) => {
+      const sub = (args ?? "").trim().toLowerCase();
+      if (!sub) {
+        await openModelPicker(ctx);
+        return;
+      }
+      await handleGateModelCli(ctx, sub, "");
     },
   });
 
@@ -840,7 +864,7 @@ export default function (pi: ExtensionAPI) {
 
   // ── Cleanup ──────────────────────────────────────────────────────
 
-  pi.on("session_end", async () => {
+  pi.on("session_shutdown", async () => {
     reset();
   });
 }

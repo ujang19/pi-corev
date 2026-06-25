@@ -1,5 +1,5 @@
 {
-  "name": "pi-pre-push-gate",
+  "name": "pi-sentinel",
   "version": "1.0.0",
   "description": "5-layer pre-push review pipeline for Pi — cross-model review gate before git push",
   "type": "module",
@@ -18,6 +18,9 @@
     "report.ts",
     "footer.ts",
     "quality-metrics.ts",
+    "model-picker.ts",
+    "model-registry.ts",
+    "gate-layer-model.ts",
     "prompts/",
     "hooks/",
     "README.md"
@@ -35,9 +38,11 @@
   "license": "MIT",
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.80",
-    "@earendil-works/pi-tui": ">=0.80"
+    "@earendil-works/pi-tui": ">=0.80",
+    "@sinclair/typebox": "*"
   },
-  "dependencies": {
-    "typebox": "^2.0.0"
+  "pi": {
+    "extensions": ["./index.ts"],
+    "prompts": ["./prompts"]
   }
 }
