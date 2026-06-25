@@ -1,0 +1,43 @@
+{
+  "name": "pi-pre-push-gate",
+  "version": "1.0.0",
+  "description": "5-layer pre-push review pipeline for Pi — cross-model review gate before git push",
+  "type": "module",
+  "main": "index.ts",
+  "files": [
+    "index.ts",
+    "state.ts",
+    "settings.ts",
+    "layer0-compaction.ts",
+    "layer1-self-review.ts",
+    "layer2-structured.ts",
+    "layer3-security.ts",
+    "layer4-test-gate.ts",
+    "layer5-human.ts",
+    "git-hook.ts",
+    "report.ts",
+    "footer.ts",
+    "quality-metrics.ts",
+    "prompts/",
+    "hooks/",
+    "README.md"
+  ],
+  "keywords": [
+    "pi",
+    "pi-extension",
+    "pi-package",
+    "code-review",
+    "pre-push",
+    "gate",
+    "security-audit",
+    "cross-model-review"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.80",
+    "@earendil-works/pi-tui": ">=0.80"
+  },
+  "dependencies": {
+    "typebox": "^2.0.0"
+  }
+}
